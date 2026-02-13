@@ -1,957 +1,481 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// ─── Theme ───────────────────────────────────────────────────────────
-const T = {
-  bg: "#f8f8f7", surface: "#ffffff", surfaceAlt: "#f3f2f0",
-  border: "#e5e2dd", borderLight: "#eeecea",
-  text: "#2c2825", textSecondary: "#6b655c", textMuted: "#a9a49b", textFaint: "#d1cdc7",
-  accent: "#2c2825",
-  agentBg: "#fefdfb", agentBorder: "#ebe8e3",
-  activeBg: "#fffbeb", activeBorder: "#fde68a", activeText: "#92400e",
-  error: "#c53030", errorBg: "#fff5f5", errorBorder: "#fed7d7",
-  success: "#2f855a", successBg: "#f0fdf4", successBorder: "#bbf7d0",
-  link: "#1d4ed8",
-};
+// ─── Constants ───────────────────────────────────────────────────────
+const EXTRACTION_MODES = [
+  { id: "full", label: "Full Extract", desc: "Text, links, images, metadata, structured data", icon: "⬡" },
+  { id: "text", label: "Text Only", desc: "Clean readable content, stripped of markup", icon: "¶" },
+  { id: "links", label: "Links & Assets", desc: "Hyperlinks, images, scripts, stylesheets", icon: "⤴" },
+  { id: "structured", label: "Structured", desc: "Tables, JSON-LD, OpenGraph, Schema.org", icon: "⊞" },
+  { id: "developer", label: "Developer", desc: "Tech stack, DOM analysis, API endpoints", icon: "⌘" },
+];
 
-const MONO = "'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',monospace";
-const SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif";
-const SERIF = "'Georgia','Times New Roman',serif";
+const CRAWL_SCOPES = [
+  { id: "single", label: "Single Page", desc: "Just this URL", depth: "1 page" },
+  { id: "connected", label: "Connected", desc: "URL + linked same-domain pages", depth: "~10 pages" },
+  { id: "deep", label: "Deep Crawl", desc: "Recursive full-site crawl", depth: "up to 50" },
+];
 
-// ─── Export Formats ──────────────────────────────────────────────────
 const EXPORT_FORMATS = [
   { id: "json", label: "JSON", ext: ".json", mime: "application/json" },
   { id: "csv", label: "CSV", ext: ".csv", mime: "text/csv" },
-  { id: "markdown", label: "Markdown", ext: ".md", mime: "text/markdown" },
-  { id: "txt", label: "Plain Text", ext: ".txt", mime: "text/plain" },
+  { id: "markdown", label: "MD", ext: ".md", mime: "text/markdown" },
+  { id: "html", label: "HTML", ext: ".html", mime: "text/html" },
+  { id: "txt", label: "TXT", ext: ".txt", mime: "text/plain" },
   { id: "sql", label: "SQL", ext: ".sql", mime: "text/plain" },
 ];
 
+// ─── Palette ─────────────────────────────────────────────────────────
+const P = {
+  // Backgrounds
+  base: "#0f1117",
+  raised: "#171921",
+  elevated: "#1e2130",
+  glass: "rgba(30, 33, 48, 0.7)",
+  // Borders
+  border: "rgba(255,255,255,0.06)",
+  borderHover: "rgba(255,255,255,0.12)",
+  borderActive: "rgba(232,186,99,0.3)",
+  // Text
+  white: "#f0ede6",
+  cream: "#c8c3b8",
+  muted: "#7d7a72",
+  faint: "#44433e",
+  // Accent — warm amber/gold
+  accent: "#e8ba63",
+  accentDim: "#c49a42",
+  accentGlow: "rgba(232,186,99,0.15)",
+  accentGlowStrong: "rgba(232,186,99,0.25)",
+  // Semantic
+  success: "#6fcf97",
+  successDim: "rgba(111,207,151,0.12)",
+  error: "#f07070",
+  errorDim: "rgba(240,112,112,0.1)",
+  errorBorder: "rgba(240,112,112,0.25)",
+  // Type badges
+  badge: "rgba(255,255,255,0.04)",
+};
+
+const TYPE_COLORS = {
+  webpage:"#e8ba63",json:"#f0a050",csv:"#6fcf97",pdf:"#f07070",image:"#b07af0",
+  xml:"#60a0f0",code:"#f070b0",audio:"#50d0c0",video:"#f08040",archive:"#8080f0",
+  document:"#50b0e0",spreadsheet:"#60d080",
+};
+
 // ─── Utilities ───────────────────────────────────────────────────────
-function downloadFile(content, filename, mime) {
-  const b = new Blob([content], { type: mime });
-  const u = URL.createObjectURL(b);
-  const a = document.createElement("a");
-  a.href = u; a.download = filename;
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a); URL.revokeObjectURL(u);
+function detectUrlType(url) {
+  const ext = url.toLowerCase().split("?")[0].split("#")[0].split(".").pop();
+  const m = {json:"json",csv:"csv",tsv:"csv",xml:"xml",pdf:"pdf",png:"image",jpg:"image",jpeg:"image",gif:"image",webp:"image",svg:"image",mp3:"audio",wav:"audio",mp4:"video",webm:"video",zip:"archive",gz:"archive",js:"code",css:"code",py:"code",doc:"document",docx:"document",xls:"spreadsheet",xlsx:"spreadsheet"};
+  return m[ext] || "webpage";
 }
-
-function escapeCSV(val) {
-  const s = String(val ?? "");
-  return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+function getDomain(url) { try { return new URL(url).hostname; } catch { return ""; } }
+function escapeCSV(v) { const s=String(v??""); return s.includes(",")||s.includes('"')||s.includes("\n")?`"${s.replace(/"/g,'""')}"`:s; }
+function generateSQL(data, tn="scraped_data") {
+  if(!data||typeof data!=="object") return "-- No data";
+  const rows=Array.isArray(data)?data:[data]; if(!rows.length) return "-- Empty";
+  const cols=[...new Set(rows.flatMap(r=>Object.keys(r)))];
+  return `CREATE TABLE IF NOT EXISTS ${tn} (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n${cols.map(c=>`  "${c}" TEXT`).join(",\n")}\n);\n\n`+rows.map(row=>`INSERT INTO ${tn} (${cols.map(c=>`"${c}"`).join(", ")}) VALUES (${cols.map(c=>{const v=row[c];return v==null?"NULL":`'${String(v).replace(/'/g,"''")}'`}).join(", ")});`).join("\n");
 }
-
-function flattenForCSV(pages) {
-  const rows = [];
-  pages.forEach(p => {
-    if (p.structured) {
-      const walk = (obj, prefix = "") => {
-        if (Array.isArray(obj)) {
-          obj.forEach((item, i) => {
-            if (typeof item === "object" && item) walk(item, `${prefix}[${i}]`);
-            else rows.push({ source_url: p.url, key: `${prefix}[${i}]`, value: String(item) });
-          });
-        } else if (typeof obj === "object" && obj) {
-          Object.entries(obj).forEach(([k, v]) => {
-            if (typeof v === "object" && v) walk(v, prefix ? `${prefix}.${k}` : k);
-            else rows.push({ source_url: p.url, key: prefix ? `${prefix}.${k}` : k, value: String(v) });
-          });
-        }
-      };
-      walk(p.structured);
-    } else {
-      rows.push({ source_url: p.url, key: "text", value: p.rawText?.substring(0, 500) || "" });
-    }
-  });
-  return rows;
+function convertToCSV(data) {
+  if(!data||typeof data!=="object") return String(data);
+  const rows=Array.isArray(data)?data:[data]; if(!rows.length) return "";
+  const cols=[...new Set(rows.flatMap(r=>Object.keys(r)))];
+  return cols.map(escapeCSV).join(",")+"\n"+rows.map(row=>cols.map(c=>escapeCSV(row[c])).join(",")).join("\n");
 }
-
-function generateExport(pages, summary, format, query) {
-  const slug = query.replace(/[^a-z0-9]+/gi, "_").substring(0, 30);
-  const fname = `research_${slug}_${Date.now()}${format.ext}`;
-  let content;
-
-  switch (format.id) {
-    case "json":
-      content = JSON.stringify({
-        research_query: query,
-        timestamp: new Date().toISOString(),
-        summary,
-        total_pages: pages.length,
-        pages: pages.map(p => ({
-          url: p.url,
-          data: p.structured || { text: p.rawText },
-        })),
-      }, null, 2);
-      break;
-    case "csv": {
-      const rows = flattenForCSV(pages);
-      if (rows.length) {
-        const cols = Object.keys(rows[0]);
-        content = cols.map(escapeCSV).join(",") + "\n" + rows.map(r => cols.map(c => escapeCSV(r[c])).join(",")).join("\n");
-      } else content = "No structured data";
-      break;
-    }
-    case "markdown":
-      content = `# Research: ${query}\n\n${summary}\n\n---\n\n` +
-        pages.map(p => `## ${p.url}\n\n${p.rawText || "No content"}`).join("\n\n---\n\n");
-      break;
-    case "txt":
-      content = `Research: ${query}\n${"=".repeat(40)}\n\n${summary}\n\n` +
-        pages.map(p => `--- ${p.url} ---\n${p.rawText || "No content"}`).join("\n\n");
-      break;
-    case "sql": {
-      const rows = flattenForCSV(pages);
-      const ct = `CREATE TABLE IF NOT EXISTS research_data (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  source_url TEXT,\n  key TEXT,\n  value TEXT\n);\n\n`;
-      const ins = rows.map(r => `INSERT INTO research_data (source_url, key, value) VALUES ('${r.source_url.replace(/'/g, "''")}', '${r.key.replace(/'/g, "''")}', '${r.value.replace(/'/g, "''").substring(0, 1000)}');`).join("\n");
-      content = ct + ins;
-      break;
-    }
-    default: content = JSON.stringify(pages, null, 2);
-  }
-
-  downloadFile(content, fname, format.mime);
+function convertToMarkdown(data) {
+  if(typeof data==="string") return data; if(!data||typeof data!=="object") return String(data);
+  const render=(obj,d=0)=>{let md="";if(Array.isArray(obj))obj.forEach((it,i)=>{if(typeof it==="object"&&it)md+=`${"#".repeat(Math.min(d+2,6))} Item ${i+1}\n\n${render(it,d+1)}\n`;else md+=`- ${it}\n`;});else if(typeof obj==="object"&&obj)Object.entries(obj).forEach(([k,v])=>{if(typeof v==="object"&&v)md+=`${"#".repeat(Math.min(d+2,6))} ${k}\n\n${render(v,d+1)}\n`;else md+=`**${k}:** ${v}\n\n`;});return md;};
+  return `# Scraped Data\n\n${render(data)}`;
 }
+function downloadFile(content,filename,mime){const b=new Blob([content],{type:mime});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);}
 
 // ─── API Engine ──────────────────────────────────────────────────────
-async function callAPI(systemPrompt, userPrompt) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-    }),
-  });
-  if (!r.ok) throw new Error(`API error ${r.status}: ${await r.text()}`);
-  return r.json();
+async function callAPI(sys,usr){
+  const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:8000,system:sys,messages:[{role:"user",content:usr}],tools:[{type:"web_search_20250305",name:"web_search"}]})});
+  if(!r.ok) throw new Error(`API ${r.status}: ${await r.text()}`);return r.json();
+}
+function parseAPI(data){
+  const text=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("\n\n")||"";let structured=null;
+  try{const m=text.match(/```json\s*([\s\S]*?)```/);if(m)structured=JSON.parse(m[1].trim());else{const c=text.replace(/^[^{[]*/,"").replace(/[^}\]]*$/,"");if(c.startsWith("{")||c.startsWith("["))structured=JSON.parse(c);}}catch{}
+  return{rawText:text,structured,tokenUsage:data.usage};
+}
+function extractLinks(result,domain){
+  const links=new Set();const find=(obj)=>{if(!obj)return;if(typeof obj==="string"){(obj.match(/https?:\/\/[^\s"'<>,)}\]]+/g)||[]).forEach(u=>{try{const p=new URL(u);if((p.hostname===domain||p.hostname.endsWith("."+domain))&&!p.pathname.match(/\.(png|jpg|jpeg|gif|css|js|ico|woff|mp3|mp4|pdf)$/i))links.add(p.origin+p.pathname)}catch{}});}else if(Array.isArray(obj))obj.forEach(find);else if(typeof obj==="object")Object.values(obj).forEach(find);};
+  if(result.structured)find(result.structured);find(result.rawText);return[...links];
 }
 
-function parseResponse(data) {
-  const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("\n\n") || "";
-  let structured = null;
-  try {
-    const m = text.match(/```json\s*([\s\S]*?)```/);
-    if (m) structured = JSON.parse(m[1].trim());
-    else {
-      const c = text.replace(/^[^{[]*/, "").replace(/[^}\]]*$/, "");
-      if (c.startsWith("{") || c.startsWith("[")) structured = JSON.parse(c);
-    }
-  } catch {}
-  return { rawText: text, structured, usage: data.usage };
+async function scrapeSingle(url,mode,onP){
+  const ut=detectUrlType(url);onP(`Extracting: ${url}`);
+  const data=await callAPI(buildSys(mode,ut),`Extract data from: ${url}\n\nURL type: ${ut} | Mode: ${mode}\n\nFetch via web search, extract and structure data. Return readable summary AND JSON in \`\`\`json fences.`);
+  return{url,urlType:ut,mode,timestamp:new Date().toISOString(),...parseAPI(data)};
 }
-
-// Phase 1: Plan the research
-async function planResearch(userMessage, onStatus) {
-  onStatus("Analyzing your request...");
-
-  const sys = `You are a web research planning agent. The user will describe what data they want to find across the web. Your job is to create a research plan: determine what sites to search, what queries to use, and what data to extract.
-
-IMPORTANT: Return a JSON plan. Think about:
-- What specific forums, sites, or platforms are relevant (Reddit, Quora, specific niche forums, review sites, etc.)
-- What search queries will find the best discussions/data
-- What data points to extract from each source
-
-Return ONLY a JSON block:
-\`\`\`json
-{
-  "understanding": "Brief summary of what the user wants",
-  "strategy": "Your approach to finding this data",
-  "search_queries": [
-    "specific search query 1",
-    "specific search query 2",
-    "specific search query 3"
-  ],
-  "target_sites": ["reddit.com", "quora.com", "other relevant sites"],
-  "data_to_extract": ["key data points to look for"],
-  "estimated_sources": 10
+async function discoverPages(url,onP){
+  const domain=getDomain(url);onP(`Mapping ${domain}...`);
+  const data=await callAPI(`You are a web crawler. Find real pages for the given site. Return JSON:\n\`\`\`json\n{"discovered_urls":[{"url":"...","title":"..."}]}\n\`\`\``,`Discover all pages for: ${url}\nDomain: ${domain}\n\nSearch for sitemaps, blog posts, docs, help, products. Be thorough.`);
+  const parsed=parseAPI(data);let urls=[];if(parsed.structured?.discovered_urls)urls=parsed.structured.discovered_urls.map(u=>typeof u==="string"?u:u.url).filter(Boolean);
+  const textUrls=extractLinks(parsed,domain);const all=[...new Set([...urls,...textUrls])];onP(`Found ${all.length} pages`);return{urls:all};
 }
-\`\`\`
-
-Generate 4-8 diverse search queries that will find different angles of what the user wants. Include site-specific searches (e.g., "site:reddit.com sleeping issues remedies") and general searches.`;
-
-  const result = await callAPI(sys, userMessage);
-  const parsed = parseResponse(result);
-
-  onStatus("Research plan ready.");
-  return parsed;
+async function crawlSite(url,mode,scope,max,onP,onDone,abort){
+  const domain=getDomain(url),visited=new Set(),results=[],queue=[url];
+  if(scope!=="single"){onP(`Discovering pages on ${domain}...`);try{const d=await discoverPages(url,onP);d.urls.forEach(u=>{if(!visited.has(u)&&!queue.includes(u))queue.push(u)});onP(`${queue.length} pages found (max: ${max})`)}catch(e){onP(`Discovery partial: ${e.message}`)}}
+  const limit=scope==="single"?1:Math.min(queue.length,max);onP(`Scraping ${limit} page${limit>1?"s":""}...`);let n=0;
+  while(queue.length>0&&n<max){if(abort.current){onP("Aborted.");break;}const cur=queue.shift();if(visited.has(cur))continue;visited.add(cur);n++;onP(`[${n}/${limit}] ${cur}`);
+    try{const pr=await scrapeSingle(cur,mode,onP);results.push(pr);onDone(pr,n,limit);if(scope==="deep"&&n<max){let added=0;extractLinks(pr,domain).forEach(l=>{if(!visited.has(l)&&!queue.includes(l)){queue.push(l);added++}});if(added)onP(`  +${added} new links`)}}
+    catch(e){onP(`  ✗ ${e.message}`);results.push({url:cur,urlType:detectUrlType(cur),mode,timestamp:new Date().toISOString(),rawText:`Error: ${e.message}`,structured:null,error:true})}
+    if(queue.length>0&&n<max){await new Promise(r=>setTimeout(r,1500))}}
+  return results;
 }
-
-// Phase 2: Discover URLs using search queries
-async function discoverUrls(queries, targetSites, onStatus) {
-  onStatus(`Searching across ${queries.length} queries...`);
-
-  const sys = `You are a URL discovery engine. Use web search to find real, relevant URLs for the given search queries. For each query, find the most relevant discussion pages, forum threads, articles, and data sources.
-
-CRITICAL RULES:
-- Only return REAL URLs that actually exist
-- Prioritize discussion threads, forum posts, and community content
-- Include the page title and a brief relevance note
-- Aim for diverse sources — don't return 10 links from the same thread
-
-Return JSON:
-\`\`\`json
-{
-  "discovered_urls": [
-    { "url": "https://...", "title": "...", "source": "reddit|quora|forum|blog|other", "relevance": "why this is useful" }
-  ]
-}
-\`\`\``;
-
-  const queryList = queries.map((q, i) => `${i + 1}. ${q}`).join("\n");
-  const prompt = `Find URLs for these search queries:\n\n${queryList}\n\nTarget sites: ${targetSites.join(", ")}\n\nSearch each query and compile all unique, relevant URLs you find. Aim for 10-20 unique pages.`;
-
-  const result = await callAPI(sys, prompt);
-  const parsed = parseResponse(result);
-
-  const urls = parsed.structured?.discovered_urls || [];
-  onStatus(`Found ${urls.length} relevant pages.`);
-  return urls;
-}
-
-// Phase 3: Scrape a single URL
-async function scrapeUrl(url, dataPoints, onStatus) {
-  onStatus(`Scraping: ${url}`);
-
-  const sys = `You are a focused data extraction engine. Scrape the given URL and extract the specific data points requested. Focus on discussion content, user opinions, recommendations, complaints, and useful data.
-
-Extract:
-- Main topic/title of the page
-- Key discussion points, opinions, and recommendations
-- Specific data points requested by the researcher
-- User sentiment (positive/negative/neutral)
-- Any product mentions, brand mentions, or specific recommendations
-- Upvote counts or engagement indicators if visible
-- Date of the content if available
-
-Return a JSON block:
-\`\`\`json
-{
-  "page_title": "",
-  "source_type": "reddit_thread|forum_post|article|review|other",
-  "date": "",
-  "main_topics": [],
-  "key_findings": [
-    { "finding": "...", "sentiment": "positive|negative|neutral", "engagement": "high|medium|low" }
-  ],
-  "recommendations_mentioned": [],
-  "products_mentioned": [],
-  "raw_discussions": [
-    { "user": "", "text": "", "upvotes": 0 }
-  ],
-  "data_points": {}
-}
-\`\`\``;
-
-  const prompt = `Scrape this URL: ${url}\n\nData points to extract: ${dataPoints.join(", ")}\n\nFetch this page using web search and extract all relevant discussion data, opinions, recommendations, and specific data points.`;
-
-  const result = await callAPI(sys, prompt);
-  return parseResponse(result);
-}
-
-// Phase 4: Synthesize all findings
-async function synthesizeFindings(pages, originalQuery, onStatus) {
-  onStatus("Synthesizing findings across all sources...");
-
-  const pagesSummary = pages
-    .filter(p => !p.error)
-    .map((p, i) => `SOURCE ${i + 1} (${p.url}):\n${p.rawText?.substring(0, 800) || "No content"}`)
-    .join("\n\n---\n\n");
-
-  const sys = `You are a research synthesis engine. You've been given data scraped from multiple web sources. Create a comprehensive, actionable summary of all findings.
-
-Structure your response as:
-1. Executive summary (2-3 sentences)
-2. Key themes found across sources
-3. Most mentioned recommendations/products/solutions
-4. Sentiment overview
-5. Notable outliers or surprising findings
-6. Actionable insights
-
-Also return a JSON summary:
-\`\`\`json
-{
-  "executive_summary": "",
-  "total_sources_analyzed": 0,
-  "key_themes": [{ "theme": "", "frequency": "high|medium|low", "sources_count": 0 }],
-  "top_recommendations": [{ "item": "", "mentions": 0, "sentiment": "" }],
-  "overall_sentiment": { "positive": 0, "negative": 0, "neutral": 0 },
-  "actionable_insights": []
-}
-\`\`\``;
-
-  const prompt = `Original research query: "${originalQuery}"\n\nHere is data from ${pages.length} sources:\n\n${pagesSummary}\n\nSynthesize all findings into a comprehensive research report.`;
-
-  const result = await callAPI(sys, prompt);
-  return parseResponse(result);
-}
-
-// ─── Full Research Pipeline ──────────────────────────────────────────
-async function runResearch(userMessage, maxSources, onStatus, onPhase, onPageDone, abortRef) {
-  // Phase 1: Plan
-  onPhase("planning");
-  const plan = await planResearch(userMessage, onStatus);
-  if (abortRef.current) return null;
-
-  const queries = plan.structured?.search_queries || ["web scraping " + userMessage];
-  const targets = plan.structured?.target_sites || ["reddit.com", "quora.com"];
-  const dataPoints = plan.structured?.data_to_extract || ["key findings"];
-
-  onStatus(`Strategy: ${plan.structured?.strategy || "Searching the web..."}`);
-
-  // Phase 2: Discover
-  onPhase("discovering");
-  const discoveredUrls = await discoverUrls(queries, targets, onStatus);
-  if (abortRef.current) return null;
-
-  const urlsToScrape = discoveredUrls.slice(0, maxSources);
-  onStatus(`Will scrape ${urlsToScrape.length} of ${discoveredUrls.length} discovered pages (max: ${maxSources})`);
-
-  // Phase 3: Scrape each
-  onPhase("scraping");
-  const pages = [];
-  for (let i = 0; i < urlsToScrape.length; i++) {
-    if (abortRef.current) { onStatus("Aborted."); break; }
-
-    const urlObj = urlsToScrape[i];
-    const url = typeof urlObj === "string" ? urlObj : urlObj.url;
-
-    onStatus(`[${i + 1}/${urlsToScrape.length}] ${url}`);
-    try {
-      const scraped = await scrapeUrl(url, dataPoints, onStatus);
-      const page = { url, ...scraped, error: false };
-      pages.push(page);
-      onPageDone(page, i + 1, urlsToScrape.length);
-    } catch (err) {
-      onStatus(`  ✗ Failed: ${err.message}`);
-      pages.push({ url, rawText: `Error: ${err.message}`, structured: null, error: true });
-      onPageDone({ url, error: true }, i + 1, urlsToScrape.length);
-    }
-
-    // Rate limit pause
-    if (i < urlsToScrape.length - 1 && !abortRef.current) {
-      await new Promise(r => setTimeout(r, 1200));
-    }
-  }
-
-  if (!pages.filter(p => !p.error).length) {
-    return { pages, plan: plan.structured, synthesis: null, discoveredUrls };
-  }
-
-  // Phase 4: Synthesize
-  onPhase("synthesizing");
-  let synthesis = null;
-  try {
-    synthesis = await synthesizeFindings(pages, userMessage, onStatus);
-  } catch (err) {
-    onStatus(`Synthesis failed: ${err.message}`);
-  }
-
-  onPhase("done");
-  onStatus(`✓ Research complete — ${pages.filter(p => !p.error).length} sources analyzed.`);
-
-  return { pages, plan: plan.structured, synthesis, discoveredUrls };
-}
-
-// Also support direct URL scraping from chat
-function isDirectUrl(msg) {
-  return /^https?:\/\/\S+$/i.test(msg.trim()) || /^(www\.)\S+\.\S+$/i.test(msg.trim());
-}
-
-async function runDirectScrape(url, onStatus, onPhase) {
-  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
-  onPhase("scraping");
-  onStatus(`Direct scrape: ${url}`);
-
-  const sys = `You are an advanced web data extraction engine. Fetch the given URL and extract ALL data comprehensively. Return a readable summary AND a JSON block.
-
-Extract: page title, all text content, links, images, tables, structured data, metadata.
-
-\`\`\`json
-{
-  "metadata": { "title": "", "description": "", "language": "" },
-  "text_content": { "headings": [], "body": "" },
-  "links": { "internal": [], "external": [] },
-  "images": [],
-  "tables": [],
-  "structured_data": {}
-}
-\`\`\``;
-
-  const result = await callAPI(sys, `Extract all data from: ${url}`);
-  const parsed = parseResponse(result);
-
-  onPhase("done");
-  onStatus("✓ Scrape complete.");
-
-  return {
-    pages: [{ url, ...parsed, error: false }],
-    plan: null,
-    synthesis: null,
-    discoveredUrls: [],
-  };
+function buildSys(mode,ut){
+  const base=`You are a web data extraction engine. Fetch the URL via web search and extract data. Return a readable summary AND JSON in \`\`\`json fences.\nRules: extract REAL data only, never fabricate. Include discovered_links array.`;
+  const modes={full:`\n\nFULL: Extract meta tags, OpenGraph, JSON-LD, text by headings, links, images, tables, structured data, assets.\nJSON: {"metadata":{},"text_content":{},"links":{},"images":[],"tables":[],"structured_data":{},"discovered_links":[]}`,text:`\n\nTEXT: Clean text organized by headings.\nJSON: {"metadata":{},"content":{"headings":[],"body":"","summary":""},"discovered_links":[]}`,links:`\n\nLINKS: All URLs — hyperlinks, images, scripts, stylesheets.\nJSON: {"metadata":{},"links":{},"images":[],"assets":{},"discovered_links":[]}`,structured:`\n\nSTRUCTURED: Tables, JSON-LD, Schema.org, OpenGraph.\nJSON: {"metadata":{},"tables":[],"json_ld":[],"opengraph":{},"discovered_links":[]}`,developer:`\n\nDEV: HTTP info, tech stack, DOM, API endpoints.\nJSON: {"http":{},"tech_stack":{},"api_endpoints":[],"resources":{},"discovered_links":[]}`};
+  const files={json:"\nJSON file — parse fully.",csv:"\nCSV — parse into objects.",pdf:"\nPDF — extract text and metadata.",image:"\nImage — report metadata.",xml:"\nXML — convert to JSON.",code:"\nCode — identify language, analyze."};
+  return base+(modes[mode]||modes.full)+(files[ut]||"");
 }
 
 // ─── Components ──────────────────────────────────────────────────────
-function PhaseIndicator({ phase }) {
-  const phases = [
-    { id: "planning", label: "Planning", icon: "◇" },
-    { id: "discovering", label: "Discovering", icon: "◈" },
-    { id: "scraping", label: "Scraping", icon: "◆" },
-    { id: "synthesizing", label: "Synthesizing", icon: "◆" },
-    { id: "done", label: "Done", icon: "✓" },
-  ];
 
-  const activeIdx = phases.findIndex(p => p.id === phase);
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 16 }}>
-      {phases.map((p, i) => {
-        const isActive = p.id === phase;
-        const isDone = i < activeIdx || phase === "done";
-        return (
-          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <div style={{
-              display: "flex", alignItems: "center", gap: 6,
-              padding: "4px 10px", borderRadius: "4px", fontSize: "11px",
-              fontFamily: MONO, fontWeight: isActive ? 600 : 400,
-              background: isDone ? T.successBg : isActive ? T.activeBg : "transparent",
-              color: isDone ? T.success : isActive ? T.activeText : T.textFaint,
-              border: `1px solid ${isDone ? T.successBorder : isActive ? T.activeBorder : "transparent"}`,
-              transition: "all 0.3s ease",
-            }}>
-              {isDone ? "✓" : isActive ? <span style={{ animation: "spin 2s linear infinite", display: "inline-block" }}>⟳</span> : p.icon}
-              <span>{p.label}</span>
-            </div>
-            {i < phases.length - 1 && <div style={{ width: 12, height: 1, background: T.textFaint }} />}
-          </div>
-        );
-      })}
-    </div>
-  );
+function TypeBadge({type}){
+  const c=TYPE_COLORS[type]||P.cream;
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:20,fontSize:10,fontWeight:700,letterSpacing:0.8,textTransform:"uppercase",background:`${c}15`,color:c,border:`1px solid ${c}25`,fontFamily:"'DM Mono',monospace"}}><span style={{width:5,height:5,borderRadius:"50%",background:c,opacity:0.7}}/>{type}</span>;
 }
 
-function ScrapeProgress({ current, total, pages }) {
-  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: T.textSecondary, marginBottom: 4 }}>
-        <span>{current}/{total} sources</span><span>{pct}%</span>
-      </div>
-      <div style={{ height: 3, background: T.surfaceAlt, borderRadius: 2, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: T.activeText, borderRadius: 2, transition: "width 0.4s ease" }} />
-      </div>
-    </div>
-  );
+function GrainOverlay(){
+  return <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:9999,opacity:0.03,background:`url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`}}/>;
 }
 
-function LogPanel({ logs }) {
-  const ref = useRef(null);
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
-  return (
-    <div ref={ref} style={{
-      fontFamily: MONO, fontSize: "11px", lineHeight: "1.7", padding: "10px 14px",
-      background: T.surfaceAlt, borderRadius: "6px", border: `1px solid ${T.borderLight}`,
-      maxHeight: "140px", overflowY: "auto", marginBottom: 12,
-    }}>
-      {logs.slice(-20).map((l, i) => (
-        <div key={i} style={{ color: l.startsWith("[") ? T.activeText : l.startsWith("  ✗") ? T.error : l.startsWith("✓") ? T.success : T.textMuted }}>
-          {l}
+function ProgressLog({logs}){
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight},[logs]);
+  return(
+    <div ref={ref} style={{fontFamily:"'DM Mono',monospace",fontSize:11,lineHeight:1.8,padding:"12px 16px",background:P.raised,borderRadius:10,border:`1px solid ${P.border}`,maxHeight:180,overflowY:"auto"}}>
+      {logs.map((l,i)=>(
+        <div key={i} style={{color:l.startsWith("[")?P.accent:l.includes("✗")?P.error:l.startsWith("✓")?P.success:i===logs.length-1?P.cream:P.muted}}>
+          <span style={{color:P.faint,marginRight:8}}>{new Date().toLocaleTimeString("en-US",{hour12:false})}</span>{l}
         </div>
+      ))}
+      <span style={{display:"inline-block",width:7,height:14,background:P.accent,marginLeft:2,animation:"blink 1s step-end infinite",borderRadius:1}}/>
+    </div>
+  );
+}
+
+function CrawlBar({current,total,pages}){
+  const pct=total>0?Math.round((current/total)*100):0;
+  return(
+    <div style={{marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+        <span style={{fontSize:13,fontWeight:700,color:P.white,fontFamily:"'Syne',sans-serif"}}>{current} of {total} pages</span>
+        <span style={{fontSize:11,color:P.accent,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{pct}%</span>
+      </div>
+      <div style={{height:3,background:P.elevated,borderRadius:4,overflow:"hidden",position:"relative"}}>
+        <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${P.accentDim}, ${P.accent})`,borderRadius:4,transition:"width 0.5s cubic-bezier(0.4,0,0.2,1)",boxShadow:`0 0 12px ${P.accentGlow}`}}/>
+      </div>
+      {pages.length>0&&(
+        <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:10}}>
+          {pages.map((p,i)=>(
+            <span key={i} style={{fontSize:10,padding:"2px 8px",borderRadius:12,fontFamily:"'DM Mono',monospace",background:p.error?P.errorDim:P.successDim,color:p.error?P.error:P.success,border:`1px solid ${p.error?P.errorBorder:"rgba(111,207,151,0.2)"}`,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {p.error?"✗":"✓"} {(() => { try { return new URL(p.url).pathname||"/"; } catch { return p.url; } })()}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultViewer({results,isSingle}){
+  const [tab,setTab]=useState("preview");
+  const [pg,setPg]=useState(0);
+  const [exp,setExp]=useState({});
+  const toggle=k=>setExp(p=>({...p,[k]:!p[k]}));
+  const cur=isSingle?results[0]:results[pg];
+
+  const renderData=(data,depth=0)=>{
+    if(data==null)return<span style={{color:P.faint,fontStyle:"italic"}}>null</span>;
+    if(typeof data==="string")return<span style={{color:P.cream,wordBreak:"break-word"}}>{data}</span>;
+    if(typeof data==="number")return<span style={{color:P.accent}}>{data}</span>;
+    if(typeof data==="boolean")return<span style={{color:P.success}}>{String(data)}</span>;
+    if(Array.isArray(data)){
+      if(!data.length)return<span style={{color:P.faint}}>[]</span>;
+      if(data.every(d=>typeof d!=="object"))return<div style={{paddingLeft:depth>0?14:0}}>{data.map((it,i)=><div key={i} style={{padding:"2px 0",fontSize:12,color:P.cream}}><span style={{color:P.faint,marginRight:8,fontFamily:"'DM Mono',monospace",fontSize:10}}>{i}</span>{String(it)}</div>)}</div>;
+      return<div style={{paddingLeft:depth>0?8:0}}>{data.slice(0,50).map((it,i)=><div key={i} style={{margin:"4px 0",padding:"8px 12px",background:P.elevated,borderRadius:8,border:`1px solid ${P.border}`}}><div style={{fontSize:10,color:P.faint,marginBottom:3,fontFamily:"'DM Mono',monospace"}}>#{i}</div>{renderData(it,depth+1)}</div>)}{data.length>50&&<div style={{color:P.muted,fontSize:11}}>...{data.length-50} more</div>}</div>;
+    }
+    if(typeof data==="object")return<div style={{paddingLeft:depth>0?10:0}}>{Object.entries(data).map(([k,v])=>{const cx=typeof v==="object"&&v!==null;const sk=`${depth}-${k}`;const open=exp[sk]!==false;return<div key={k} style={{margin:"2px 0"}}><div onClick={cx?()=>toggle(sk):undefined} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:cx?"pointer":"default",padding:"3px 0",borderRadius:4}}>{cx&&<span style={{color:P.muted,fontSize:9,marginTop:4,transition:"transform 0.2s",transform:open?"rotate(0)":"rotate(-90deg)"}}>▼</span>}<span style={{color:P.accent,fontSize:11,fontWeight:600,fontFamily:"'DM Mono',monospace",minWidth:70,opacity:0.8}}>{k}</span>{!cx&&<span style={{color:P.cream,fontSize:12,wordBreak:"break-all"}}>{String(v)}</span>}{cx&&!open&&<span style={{color:P.faint,fontSize:11}}>{Array.isArray(v)?`[${v.length}]`:`{${Object.keys(v).length}}`}</span>}</div>{cx&&open&&<div style={{marginLeft:6,borderLeft:`1px solid ${P.border}`,paddingLeft:10}}>{renderData(v,depth+1)}</div>}</div>})}</div>;
+    return<span>{String(data)}</span>;
+  };
+
+  const tabs=[{id:"preview",label:"Preview"},{id:"structured",label:"Data"},{id:"raw",label:"JSON"}];
+  if(!isSingle)tabs.push({id:"aggregate",label:`All (${results.length})`});
+
+  return(
+    <div>
+      {!isSingle&&tab!=="aggregate"&&(
+        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:14}}>
+          {results.map((r,i)=>{let path="/";try{path=new URL(r.url).pathname||"/";}catch{}return(
+            <button key={i} onClick={()=>setPg(i)} style={{padding:"4px 12px",fontSize:10,borderRadius:20,cursor:"pointer",fontFamily:"'DM Mono',monospace",fontWeight:600,background:pg===i?P.accent:P.elevated,color:pg===i?P.base:r.error?P.error:P.cream,border:`1px solid ${pg===i?"transparent":P.border}`,maxWidth:150,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",transition:"all 0.2s"}}>
+              {r.error?"✗ ":""}{path}
+            </button>
+          );})}
+        </div>
+      )}
+      <div style={{display:"flex",gap:0,borderBottom:`1px solid ${P.border}`,marginBottom:16}}>
+        {tabs.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 18px",fontSize:12,fontWeight:tab===t.id?700:400,background:"none",border:"none",cursor:"pointer",color:tab===t.id?P.accent:P.muted,borderBottom:tab===t.id?`2px solid ${P.accent}`:"2px solid transparent",fontFamily:"'DM Mono',monospace",letterSpacing:0.3,transition:"all 0.2s"}}>{t.label}</button>
+        ))}
+      </div>
+      <div style={{minHeight:200}}>
+        {tab==="preview"&&cur&&<div><div style={{marginBottom:10,display:"flex",alignItems:"center",gap:8}}><TypeBadge type={cur.urlType}/><span style={{fontSize:11,color:P.muted,fontFamily:"'DM Mono',monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{cur.url}</span></div><div style={{fontSize:14,lineHeight:1.85,color:P.cream,whiteSpace:"pre-wrap",wordBreak:"break-word",fontFamily:"'Georgia','Times New Roman',serif",letterSpacing:0.2}}>{cur.rawText||"No content."}</div></div>}
+        {tab==="structured"&&cur&&(cur.structured?renderData(cur.structured):<div style={{color:P.muted,fontSize:13,padding:24,textAlign:"center",fontFamily:"'Georgia',serif",fontStyle:"italic"}}>No structured data parsed.</div>)}
+        {tab==="raw"&&cur&&<pre style={{fontFamily:"'DM Mono',monospace",fontSize:11,lineHeight:1.6,color:P.cream,background:P.elevated,padding:16,borderRadius:10,border:`1px solid ${P.border}`,overflowX:"auto",maxHeight:500,overflowY:"auto",whiteSpace:"pre-wrap"}}>{JSON.stringify(cur.structured||{text:cur.rawText},null,2)}</pre>}
+        {tab==="aggregate"&&<div><div style={{fontSize:13,color:P.muted,marginBottom:16,fontFamily:"'Syne',sans-serif"}}>{results.length} pages · {results.filter(r=>!r.error).length} ok · {results.filter(r=>r.error).length} failed</div>{results.map((r,i)=><div key={i} style={{marginBottom:8,padding:"12px 16px",background:r.error?P.errorDim:P.elevated,borderRadius:10,border:`1px solid ${r.error?P.errorBorder:P.border}`,display:"flex",alignItems:"center",gap:10}}><TypeBadge type={r.urlType}/><span style={{fontSize:12,fontWeight:600,color:P.white,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:"'DM Mono',monospace"}}>{r.url}</span><span style={{fontSize:10,fontWeight:700,color:r.error?P.error:P.success,fontFamily:"'DM Mono',monospace"}}>{r.error?"FAIL":"OK"}</span></div>)}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ExportPanel({results}){
+  const [exp,setExp]=useState(null);
+  const single=results.length===1;
+  const handleExport=(fmt)=>{
+    setExp(fmt.id);const domain=getDomain(results[0].url).replace(/\./g,"_");const fname=`scrape_${domain}_${results.length}pg_${Date.now()}${fmt.ext}`;
+    const allS=results.filter(r=>r.structured).map(r=>({_source:r.url,...r.structured}));const allT=results.map(r=>`--- ${r.url} ---\n${r.rawText}`).join("\n\n");const agg=single?(results[0].structured||results[0].rawText):allS.length?allS:allT;
+    let c;switch(fmt.id){case"json":c=JSON.stringify(single?(results[0].structured||{text:results[0].rawText}):{crawl:{pages:results.length,domain:getDomain(results[0].url)},pages:allS},null,2);break;case"csv":c=convertToCSV(agg);break;case"markdown":c=single?convertToMarkdown(agg):`# Crawl: ${getDomain(results[0].url)}\n\n`+results.map(r=>`## ${r.url}\n\n${r.rawText}`).join("\n\n---\n\n");break;case"html":c=`<!DOCTYPE html><html><head><title>Crawl</title></head><body>`+results.map(r=>`<h2>${r.url}</h2><pre>${r.rawText?.replace(/</g,"&lt;")}</pre>`).join("<hr/>")+`</body></html>`;break;case"txt":c=allT;break;case"sql":c=generateSQL(Array.isArray(agg)?agg:[agg]);break;default:c=JSON.stringify(agg,null,2)}
+    downloadFile(c,fname,fmt.mime);setTimeout(()=>setExp(null),900);
+  };
+  return(
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {EXPORT_FORMATS.map(f=>(
+        <button key={f.id} onClick={()=>handleExport(f)} disabled={exp===f.id} style={{padding:"6px 14px",fontSize:11,fontWeight:600,fontFamily:"'DM Mono',monospace",letterSpacing:0.5,background:exp===f.id?P.accentGlow:"transparent",border:`1px solid ${exp===f.id?P.accent:P.border}`,borderRadius:20,color:exp===f.id?P.accent:P.muted,cursor:"pointer",transition:"all 0.2s"}}
+          onMouseEnter={e=>{if(exp!==f.id){e.currentTarget.style.borderColor=P.borderHover;e.currentTarget.style.color=P.cream}}}
+          onMouseLeave={e=>{if(exp!==f.id){e.currentTarget.style.borderColor=P.border;e.currentTarget.style.color=P.muted}}}>
+          {exp===f.id?"✓":"↓"} {f.label}
+        </button>
       ))}
     </div>
   );
 }
 
-function ResearchResults({ data, query }) {
-  const [view, setView] = useState("summary");
-  const [activePage, setActivePage] = useState(0);
-  const [expanded, setExpanded] = useState({});
-  const [exporting, setExporting] = useState(null);
-
-  const toggle = k => setExpanded(p => ({ ...p, [k]: !p[k] }));
-
-  const renderData = (obj, depth = 0) => {
-    if (obj == null) return <span style={{ color: T.textMuted }}>null</span>;
-    if (typeof obj === "string") return <span style={{ color: T.textSecondary, wordBreak: "break-word" }}>{obj}</span>;
-    if (typeof obj === "number") return <span style={{ color: "#b45309" }}>{obj}</span>;
-    if (typeof obj === "boolean") return <span style={{ color: "#047857" }}>{String(obj)}</span>;
-    if (Array.isArray(obj)) {
-      if (!obj.length) return <span style={{ color: T.textMuted }}>[]</span>;
-      if (obj.every(d => typeof d !== "object")) return (
-        <div style={{ paddingLeft: depth > 0 ? 12 : 0 }}>{obj.map((it, i) => <div key={i} style={{ padding: "1px 0", fontSize: "12px", color: T.textSecondary }}><span style={{ color: T.textMuted }}>{i}.</span> {String(it)}</div>)}</div>
-      );
-      return (
-        <div style={{ paddingLeft: depth > 0 ? 8 : 0 }}>
-          {obj.slice(0, 40).map((it, i) => (
-            <div key={i} style={{ margin: "3px 0", padding: "6px 10px", background: T.surfaceAlt, borderRadius: "5px", border: `1px solid ${T.borderLight}`, fontSize: "12px" }}>
-              {renderData(it, depth + 1)}
-            </div>
-          ))}
-          {obj.length > 40 && <div style={{ color: T.textMuted, fontSize: "11px" }}>...{obj.length - 40} more</div>}
-        </div>
-      );
-    }
-    if (typeof obj === "object") return (
-      <div style={{ paddingLeft: depth > 0 ? 10 : 0 }}>
-        {Object.entries(obj).map(([k, v]) => {
-          const cx = typeof v === "object" && v !== null;
-          const sk = `${depth}-${k}`;
-          const open = expanded[sk] !== false;
-          return (
-            <div key={k} style={{ margin: "2px 0" }}>
-              <div onClick={cx ? () => toggle(sk) : undefined} style={{ display: "flex", alignItems: "flex-start", gap: 6, cursor: cx ? "pointer" : "default", padding: "2px 0" }}>
-                {cx && <span style={{ color: T.textMuted, fontSize: "9px", marginTop: 3 }}>{open ? "▼" : "▶"}</span>}
-                <span style={{ color: T.textSecondary, fontSize: "11px", fontWeight: 600, fontFamily: MONO, minWidth: 70 }}>{k}</span>
-                {!cx && <span style={{ color: T.text, fontSize: "12px", wordBreak: "break-all" }}>{String(v)}</span>}
-                {cx && !open && <span style={{ color: T.textMuted, fontSize: "11px" }}>{Array.isArray(v) ? `[${v.length}]` : `{${Object.keys(v).length}}`}</span>}
-              </div>
-              {cx && open && <div style={{ marginLeft: 6 }}>{renderData(v, depth + 1)}</div>}
-            </div>
-          );
-        })}
-      </div>
-    );
-    return <span>{String(obj)}</span>;
-  };
-
-  const views = [
-    { id: "summary", label: "Summary" },
-    { id: "sources", label: `Sources (${data.pages.length})` },
-    { id: "structured", label: "Structured Data" },
-    { id: "raw", label: "Raw JSON" },
-  ];
-
-  const handleExport = (fmt) => {
-    setExporting(fmt.id);
-    generateExport(data.pages, data.synthesis?.rawText || "", fmt, query);
-    setTimeout(() => setExporting(null), 800);
-  };
-
-  return (
-    <div style={{ background: T.surface, borderRadius: "10px", border: `1px solid ${T.border}`, overflow: "hidden" }}>
-      {/* Export bar */}
-      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: "11px", color: T.textMuted, fontFamily: MONO, fontWeight: 600, letterSpacing: "0.5px", textTransform: "uppercase", marginRight: 4 }}>Export</span>
-        {EXPORT_FORMATS.map(fmt => (
-          <button key={fmt.id} onClick={() => handleExport(fmt)} style={{
-            padding: "4px 10px", fontSize: "11px", fontFamily: MONO,
-            background: exporting === fmt.id ? T.successBg : "transparent",
-            border: `1px solid ${exporting === fmt.id ? T.successBorder : T.border}`,
-            borderRadius: "4px", cursor: "pointer",
-            color: exporting === fmt.id ? T.success : T.textSecondary,
-            transition: "all 0.15s",
-          }}>
-            {exporting === fmt.id ? "✓" : "↓"} {fmt.label}
-          </button>
-        ))}
-      </div>
-
-      {/* View tabs */}
-      <div style={{ display: "flex", borderBottom: `1px solid ${T.borderLight}` }}>
-        {views.map(v => (
-          <button key={v.id} onClick={() => setView(v.id)} style={{
-            padding: "8px 14px", fontSize: "12px", fontWeight: 500, fontFamily: MONO,
-            background: "none", border: "none", cursor: "pointer",
-            color: view === v.id ? T.text : T.textMuted,
-            borderBottom: view === v.id ? `2px solid ${T.accent}` : "2px solid transparent",
-            transition: "all 0.15s",
-          }}>
-            {v.label}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ padding: "16px", minHeight: 200, maxHeight: 600, overflowY: "auto" }}>
-        {view === "summary" && (
-          <div>
-            {data.synthesis ? (
-              <div style={{ fontSize: "14px", lineHeight: "1.8", color: T.textSecondary, fontFamily: SERIF, whiteSpace: "pre-wrap" }}>
-                {data.synthesis.rawText}
-              </div>
-            ) : (
-              <div style={{ color: T.textMuted, textAlign: "center", padding: 20 }}>
-                No synthesis available — check individual sources.
-              </div>
-            )}
-          </div>
-        )}
-
-        {view === "sources" && (
-          <div>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 12 }}>
-              {data.pages.map((p, i) => {
-                let host = ""; try { host = new URL(p.url).hostname; } catch {}
-                return (
-                  <button key={i} onClick={() => setActivePage(i)} style={{
-                    padding: "4px 10px", fontSize: "11px", fontFamily: MONO, borderRadius: "4px", cursor: "pointer",
-                    background: activePage === i ? T.accent : p.error ? T.errorBg : "transparent",
-                    color: activePage === i ? "#fff" : p.error ? T.error : T.textSecondary,
-                    border: `1px solid ${activePage === i ? T.accent : p.error ? T.errorBorder : T.border}`,
-                    maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {p.error ? "✗ " : ""}{host}
-                  </button>
-                );
-              })}
-            </div>
-            {data.pages[activePage] && (
-              <div>
-                <div style={{ fontSize: "11px", color: T.link, marginBottom: 8, wordBreak: "break-all" }}>{data.pages[activePage].url}</div>
-                <div style={{ fontSize: "13px", lineHeight: "1.7", color: T.textSecondary, fontFamily: SERIF, whiteSpace: "pre-wrap" }}>
-                  {data.pages[activePage].rawText || "No content"}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {view === "structured" && (
-          <div>
-            {data.synthesis?.structured && (
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: "11px", fontFamily: MONO, fontWeight: 600, color: T.textMuted, letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 8 }}>Synthesis</div>
-                {renderData(data.synthesis.structured)}
-              </div>
-            )}
-            {data.pages.filter(p => p.structured).map((p, i) => (
-              <div key={i} style={{ marginBottom: 12, padding: "12px", background: T.surfaceAlt, borderRadius: "6px", border: `1px solid ${T.borderLight}` }}>
-                <div style={{ fontSize: "11px", color: T.link, marginBottom: 6 }}>{p.url}</div>
-                {renderData(p.structured)}
-              </div>
-            ))}
-            {!data.pages.some(p => p.structured) && !data.synthesis?.structured && (
-              <div style={{ color: T.textMuted, textAlign: "center", padding: 20 }}>No structured data.</div>
-            )}
-          </div>
-        )}
-
-        {view === "raw" && (
-          <pre style={{
-            fontFamily: MONO, fontSize: "11px", lineHeight: "1.5", color: T.textSecondary,
-            background: T.surfaceAlt, padding: "14px", borderRadius: "6px",
-            border: `1px solid ${T.borderLight}`, whiteSpace: "pre-wrap", maxHeight: 500, overflowY: "auto",
-          }}>
-            {JSON.stringify({
-              query, plan: data.plan,
-              synthesis: data.synthesis?.structured,
-              pages: data.pages.map(p => ({ url: p.url, data: p.structured })),
-            }, null, 2)}
-          </pre>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Chat Message Component ──────────────────────────────────────────
-function ChatMessage({ msg }) {
-  if (msg.role === "user") {
-    return (
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-        <div style={{
-          maxWidth: "75%", padding: "10px 14px", borderRadius: "12px 12px 2px 12px",
-          background: T.accent, color: "#fff", fontSize: "14px", lineHeight: "1.6", fontFamily: SANS,
-        }}>
-          {msg.content}
-        </div>
-      </div>
-    );
-  }
-
-  // Agent message
-  return (
-    <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 16 }}>
-      <div style={{ maxWidth: "90%", width: "100%" }}>
-        {/* Agent label */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: msg.loading ? T.activeText : T.success }} />
-          <span style={{ fontSize: "11px", fontFamily: MONO, fontWeight: 600, color: T.textMuted, letterSpacing: "0.5px", textTransform: "uppercase" }}>
-            {msg.loading ? "Researching..." : "Agent"}
-          </span>
-        </div>
-
-        <div style={{
-          padding: "14px 16px", borderRadius: "2px 12px 12px 12px",
-          background: T.agentBg, border: `1px solid ${T.agentBorder}`,
-        }}>
-          {/* Phase indicator */}
-          {msg.phase && msg.phase !== "done" && <PhaseIndicator phase={msg.phase} />}
-
-          {/* Scrape progress */}
-          {msg.scrapeProgress && msg.scrapeProgress.total > 1 && (
-            <ScrapeProgress current={msg.scrapeProgress.current} total={msg.scrapeProgress.total} pages={msg.scrapeProgress.pages} />
-          )}
-
-          {/* Status log */}
-          {msg.logs && msg.logs.length > 0 && msg.loading && <LogPanel logs={msg.logs} />}
-
-          {/* Text content */}
-          {msg.text && (
-            <div style={{ fontSize: "14px", lineHeight: "1.7", color: T.textSecondary, fontFamily: SANS, whiteSpace: "pre-wrap" }}>
-              {msg.text}
-            </div>
-          )}
-
-          {/* Research results */}
-          {msg.results && <ResearchResults data={msg.results} query={msg.query || ""} />}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Suggestions ─────────────────────────────────────────────────────
-const SUGGESTIONS = [
-  "Find Reddit discussions about common sleeping issues and what remedies people recommend",
-  "Scrape health forums for discussions about hair loss treatments and what actually works",
-  "Research trending dropshipping products people are talking about on forums",
-  "Find discussions about the best budget mechanical keyboards across Reddit and forums",
-  "https://news.ycombinator.com",
-];
-
 // ─── Main App ────────────────────────────────────────────────────────
-export default function WebScraper() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [maxSources, setMaxSources] = useState(8);
-  const [showSettings, setShowSettings] = useState(false);
-  const abortRef = useRef(false);
-  const chatEndRef = useRef(null);
-  const inputRef = useRef(null);
+export default function WebScraper(){
+  const [url,setUrl]=useState("");
+  const [mode,setMode]=useState("full");
+  const [scope,setScope]=useState("single");
+  const [maxPages,setMaxPages]=useState(10);
+  const [loading,setLoading]=useState(false);
+  const [logs,setLogs]=useState([]);
+  const [results,setResults]=useState([]);
+  const [error,setError]=useState(null);
+  const [history,setHistory]=useState([]);
+  const [showModes,setShowModes]=useState(false);
+  const [showScope,setShowScope]=useState(false);
+  const [crawlProg,setCrawlProg]=useState({current:0,total:0,pages:[]});
+  const abort=useRef(false);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const addLog=useCallback(m=>setLogs(p=>[...p,m]),[]);
 
-  const updateLastAgent = useCallback((updates) => {
-    setMessages(prev => {
-      const msgs = [...prev];
-      const lastAgent = msgs.findLastIndex(m => m.role === "agent");
-      if (lastAgent >= 0) msgs[lastAgent] = { ...msgs[lastAgent], ...updates };
-      return msgs;
-    });
-  }, []);
-
-  const handleSend = async () => {
-    const msg = input.trim();
-    if (!msg || isLoading) return;
-
-    setInput("");
-    setIsLoading(true);
-    abortRef.current = false;
-
-    // Add user message
-    setMessages(prev => [...prev, { role: "user", content: msg }]);
-
-    // Add loading agent message
-    const agentMsg = { role: "agent", text: "", loading: true, phase: null, logs: [], scrapeProgress: null, results: null, query: msg };
-    setMessages(prev => [...prev, agentMsg]);
-
-    try {
-      let result;
-
-      if (isDirectUrl(msg)) {
-        // Direct URL scrape
-        result = await runDirectScrape(
-          msg,
-          (status) => updateLastAgent({ logs: prev => { const l = [...(Array.isArray(prev?.logs) ? prev.logs : []), status]; return { logs: l }; } }),
-          (phase) => updateLastAgent({ phase }),
-        );
-
-        // Simplified status updates for direct scrape
-        const statusLogs = [];
-        const logFn = (s) => { statusLogs.push(s); updateLastAgent({ logs: statusLogs }); };
-        const phaseFn = (p) => updateLastAgent({ phase: p });
-
-        result = await runDirectScrape(msg, logFn, phaseFn);
-      } else {
-        // AI research pipeline
-        const statusLogs = [];
-        const logFn = (s) => { statusLogs.push(s); updateLastAgent({ logs: statusLogs }); };
-        const phaseFn = (p) => updateLastAgent({ phase: p });
-        const pageFn = (page, current, total) => {
-          updateLastAgent({ scrapeProgress: { current, total, pages: [] } });
-        };
-
-        result = await runResearch(msg, maxSources, logFn, phaseFn, pageFn, abortRef);
-      }
-
-      if (result) {
-        const successCount = result.pages.filter(p => !p.error).length;
-        const summaryText = isDirectUrl(msg)
-          ? `Scraped successfully. ${result.pages[0]?.structured ? "Structured data extracted." : "Text content extracted."}`
-          : `Research complete. Analyzed ${successCount} source${successCount !== 1 ? "s" : ""} across the web.`;
-
-        updateLastAgent({
-          text: summaryText,
-          loading: false,
-          phase: "done",
-          results: result,
-          query: msg,
-        });
-      }
-    } catch (err) {
-      updateLastAgent({
-        text: `Something went wrong: ${err.message}\n\nTry rephrasing your request or pasting a direct URL.`,
-        loading: false,
-        phase: null,
-      });
-    } finally {
-      setIsLoading(false);
-    }
+  const handleScrape=async()=>{
+    if(!url.trim())return;let target=url.trim();if(!/^https?:\/\//i.test(target))target="https://"+target;
+    try{new URL(target)}catch{setError("Invalid URL.");return;}
+    setLoading(true);setError(null);setResults([]);setLogs([]);abort.current=false;setCrawlProg({current:0,total:scope==="single"?1:maxPages,pages:[]});
+    addLog(`Target: ${target}`);addLog(`Mode: ${EXTRACTION_MODES.find(m=>m.id===mode)?.label} · Scope: ${CRAWL_SCOPES.find(s=>s.id===scope)?.label}`);
+    try{
+      const cr=await crawlSite(target,mode,scope,scope==="single"?1:maxPages,addLog,(pr,cur,tot)=>{setCrawlProg(p=>({current:cur,total:Math.max(tot,p.total),pages:[...p.pages,{url:pr.url,error:pr.error}]}));setResults(p=>[...p,pr])},abort);
+      if(!cr.length)throw new Error("No pages scraped.");
+      setHistory(p=>[{url:target,mode,scope,pageCount:cr.length,timestamp:new Date().toISOString(),urlType:cr[0].urlType},...p].slice(0,20));
+      addLog(`✓ Done — ${cr.filter(r=>!r.error).length}/${cr.length} pages extracted.`);
+    }catch(e){setError(e.message);addLog(`✗ ${e.message}`)}finally{setLoading(false)}
   };
 
-  const handleAbort = () => { abortRef.current = true; };
+  const selMode=EXTRACTION_MODES.find(m=>m.id===mode);
+  const selScope=CRAWL_SCOPES.find(s=>s.id===scope);
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: SANS }}>
+  return(
+    <div style={{minHeight:"100vh",background:P.base,color:P.white,position:"relative",display:"flex",flexDirection:"column"}}>
+      <GrainOverlay/>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap');
         @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
         @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-        ::selection{background:#2c282518}
-        ::-webkit-scrollbar{width:6px;height:6px}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+        @keyframes glow{0%,100%{box-shadow:0 0 20px ${P.accentGlow}}50%{box-shadow:0 0 40px ${P.accentGlowStrong}}}
+        ::selection{background:${P.accentGlow};color:${P.white}}
+        ::-webkit-scrollbar{width:5px;height:5px}
         ::-webkit-scrollbar-track{background:transparent}
-        ::-webkit-scrollbar-thumb{background:${T.textFaint};border-radius:3px}
-        input::placeholder{color:${T.textFaint}}
-        textarea::placeholder{color:${T.textFaint}}
-        textarea{resize:none}
-        input[type=range]{-webkit-appearance:none;height:4px;background:${T.border};border-radius:2px;outline:none}
-        input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;background:${T.accent};border-radius:50%;cursor:pointer}
+        ::-webkit-scrollbar-thumb{background:${P.faint};border-radius:10px}
+        ::-webkit-scrollbar-thumb:hover{background:${P.muted}}
+        input::placeholder{color:${P.faint}}
+        input[type=range]{-webkit-appearance:none;height:3px;background:${P.elevated};border-radius:4px;outline:none}
+        input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;background:${P.accent};border-radius:50%;cursor:pointer;box-shadow:0 0 10px ${P.accentGlow}}
       `}</style>
 
-      {/* Header */}
-      <div style={{
-        padding: "12px 24px", borderBottom: `1px solid ${T.border}`,
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        background: T.surface,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: isLoading ? T.activeText : T.textFaint,
-            boxShadow: isLoading ? `0 0 8px ${T.activeText}40` : "none",
-          }} />
-          <span style={{ fontSize: "13px", fontWeight: 600, letterSpacing: "1px", textTransform: "uppercase", fontFamily: MONO, color: T.text }}>
-            WebScrape
-          </span>
-          <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: MONO }}>v3 — AI Research Agent</span>
-        </div>
-        <button onClick={() => setShowSettings(!showSettings)} style={{
-          padding: "4px 12px", fontSize: "11px", fontFamily: MONO,
-          background: showSettings ? T.surfaceAlt : "transparent",
-          border: `1px solid ${showSettings ? T.border : "transparent"}`,
-          borderRadius: "4px", cursor: "pointer", color: T.textMuted,
-        }}>
-          ⚙ Sources: {maxSources}
-        </button>
-      </div>
+      <div style={{maxWidth:880,margin:"0 auto",padding:"56px 28px",position:"relative",zIndex:1,flex:1,width:"100%",boxSizing:"border-box"}}>
 
-      {/* Settings panel */}
-      {showSettings && (
-        <div style={{ padding: "12px 24px", background: T.surface, borderBottom: `1px solid ${T.border}`, animation: "fadeIn 0.15s ease" }}>
-          <div style={{ maxWidth: 400 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <span style={{ fontSize: "12px", color: T.textSecondary }}>Max sources per research</span>
-              <span style={{ fontSize: "14px", fontWeight: 600, fontFamily: MONO, color: T.text }}>{maxSources}</span>
+        {/* ── Header ── */}
+        <div style={{marginBottom:48,animation:"fadeUp 0.6s ease",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:14}}>
+            {/* Logo SVG */}
+            <div style={{position:"relative",width:36,height:36,flexShrink:0}}>
+              <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="1" y="1" width="34" height="34" rx="8" stroke={P.accent} strokeWidth="1.5" fill="none" opacity="0.3"/>
+                <rect x="4" y="4" width="28" height="28" rx="6" fill={P.accent} opacity="0.08"/>
+                <path d="M12 13.5C12 13.5 14.5 11 18 11C21.5 11 24 13.5 24 13.5" stroke={P.accent} strokeWidth="1.8" strokeLinecap="round"/>
+                <path d="M10 17C10 17 13 14 18 14C23 14 26 17 26 17" stroke={P.accent} strokeWidth="1.8" strokeLinecap="round" opacity="0.6"/>
+                <path d="M8 20.5C8 20.5 11.5 17 18 17C24.5 17 28 20.5 28 20.5" stroke={P.accent} strokeWidth="1.8" strokeLinecap="round" opacity="0.3"/>
+                <circle cx="18" cy="23" r="2.5" fill={P.accent}/>
+                <line x1="18" y1="25.5" x2="18" y2="28" stroke={P.accent} strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              {loading && <div style={{position:"absolute",inset:-2,borderRadius:10,animation:"glow 2s ease infinite"}}/>}
             </div>
-            <input type="range" min={3} max={30} value={maxSources} onChange={e => setMaxSources(Number(e.target.value))} style={{ width: "100%" }} />
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: T.textFaint, marginTop: 2 }}>
-              <span>3 (quick)</span><span>30 (thorough)</span>
+            <div>
+              <div style={{fontSize:15,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:P.white,fontFamily:"'Syne',sans-serif",lineHeight:1}}>WebScrape</div>
+              <div style={{fontSize:11,color:P.muted,fontFamily:"'DM Mono',monospace",marginTop:3}}>Extract <span style={{color:P.accent}}>everything</span> from any page on the web</div>
             </div>
           </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:loading?P.accent:P.faint,transition:"all 0.4s",animation:loading?"glow 2s ease infinite":"none"}}/>
+            <span style={{fontSize:10,color:loading?P.accent:P.faint,fontFamily:"'DM Mono',monospace",fontWeight:500,letterSpacing:0.5}}>{loading?"Extracting...":"Ready"}</span>
+          </div>
         </div>
-      )}
 
-      {/* Chat area */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 24px 100px" }}>
-        <div style={{ maxWidth: 800, margin: "0 auto" }}>
-          {/* Welcome state */}
-          {messages.length === 0 && (
-            <div style={{ textAlign: "center", paddingTop: 60 }}>
-              <div style={{ fontSize: "28px", fontWeight: 700, color: T.text, marginBottom: 8, fontFamily: SANS }}>
-                What do you want to research?
+        {/* ── URL Input ── */}
+        <div style={{marginBottom:24,animation:"fadeUp 0.6s ease 0.1s both"}}>
+          <div style={{display:"flex",background:P.raised,border:`1px solid ${loading?P.borderActive:P.border}`,borderRadius:14,overflow:"hidden",transition:"border-color 0.3s",boxShadow:loading?`0 0 30px ${P.accentGlow}`:"0 2px 20px rgba(0,0,0,0.2)"}}>
+            <input type="text" value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!loading)handleScrape()}}
+              placeholder="https://airbnb.com" disabled={loading}
+              style={{flex:1,padding:"18px 20px",fontSize:14,background:"transparent",border:"none",outline:"none",color:P.white,fontFamily:"'DM Mono',monospace",letterSpacing:0.3}}/>
+            {loading?(
+              <button onClick={()=>{abort.current=true}} style={{padding:"18px 24px",fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",background:"transparent",color:P.error,border:"none",borderLeft:`1px solid ${P.border}`,cursor:"pointer",fontFamily:"'DM Mono',monospace",transition:"all 0.2s"}}>Stop</button>
+            ):(
+              <button onClick={handleScrape} disabled={!url.trim()} style={{padding:"18px 28px",fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",background:url.trim()?`linear-gradient(135deg, ${P.accentDim}, ${P.accent})`:"transparent",color:url.trim()?P.base:P.faint,border:"none",borderLeft:`1px solid ${P.border}`,cursor:url.trim()?"pointer":"default",fontFamily:"'DM Mono',monospace",transition:"all 0.3s"}}>Extract</button>
+            )}
+          </div>
+          {url&&!loading&&(
+            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,paddingLeft:4}}>
+              <TypeBadge type={detectUrlType(url)}/><span style={{fontSize:11,color:P.faint,fontFamily:"'DM Mono',monospace"}}>{getDomain(url.startsWith("http")?url:"https://"+url)}</span>
+            </div>
+          )}
+        </div>
+
+        {/* ── Controls Row ── */}
+        <div style={{display:"flex",gap:16,marginBottom:32,animation:"fadeUp 0.6s ease 0.2s both",flexWrap:"wrap"}}>
+
+          {/* Scope Selector */}
+          <div style={{flex:1,minWidth:260}}>
+            <button onClick={()=>setShowScope(!showScope)} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",fontSize:12,background:"none",border:"none",cursor:"pointer",color:P.muted,fontFamily:"'DM Mono',monospace",width:"100%"}}>
+              <span style={{fontSize:8,transition:"transform 0.2s",transform:showScope?"rotate(90deg)":"none"}}>▶</span>
+              <span>Scope</span>
+              <span style={{color:scope!=="single"?P.accent:P.cream,fontWeight:600,marginLeft:4}}>{selScope?.label}</span>
+              {scope!=="single"&&<span style={{fontSize:10,color:P.faint,marginLeft:"auto"}}>max {maxPages}</span>}
+            </button>
+            {showScope&&(
+              <div style={{animation:"fadeUp 0.2s ease"}}>
+                <div style={{display:"grid",gap:6,marginTop:6}}>
+                  {CRAWL_SCOPES.map(s=>(
+                    <button key={s.id} onClick={()=>setScope(s.id)} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",textAlign:"left",background:scope===s.id?P.accentGlow:P.raised,border:`1px solid ${scope===s.id?P.borderActive:P.border}`,borderRadius:10,cursor:"pointer",transition:"all 0.2s"}}
+                      onMouseEnter={e=>{if(scope!==s.id)e.currentTarget.style.borderColor=P.borderHover}}onMouseLeave={e=>{if(scope!==s.id)e.currentTarget.style.borderColor=P.border}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:scope===s.id?P.accent:P.faint,transition:"all 0.2s",boxShadow:scope===s.id?`0 0 8px ${P.accentGlow}`:"none"}}/>
+                      <div><div style={{fontSize:12,fontWeight:600,color:scope===s.id?P.white:P.cream,fontFamily:"'DM Mono',monospace"}}>{s.label}</div><div style={{fontSize:11,color:P.muted,marginTop:2}}>{s.desc}</div></div>
+                      <span style={{fontSize:10,color:P.faint,fontFamily:"'DM Mono',monospace",marginLeft:"auto"}}>{s.depth}</span>
+                    </button>
+                  ))}
+                </div>
+                {scope!=="single"&&(
+                  <div style={{marginTop:10,padding:"12px 16px",background:P.raised,borderRadius:10,border:`1px solid ${P.border}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                      <span style={{fontSize:11,color:P.muted}}>Max pages</span>
+                      <span style={{fontSize:14,fontWeight:600,color:P.accent,fontFamily:"'DM Mono',monospace"}}>{maxPages}</span>
+                    </div>
+                    <input type="range" min={2} max={50} value={maxPages} onChange={e=>setMaxPages(Number(e.target.value))} style={{width:"100%"}}/>
+                  </div>
+                )}
               </div>
-              <p style={{ fontSize: "14px", color: T.textMuted, maxWidth: 500, margin: "0 auto 32px", lineHeight: 1.6 }}>
-                Tell me what data you need and I'll search the web, scrape relevant sources, and synthesize the findings. Or paste a URL to scrape directly.
-              </p>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 560, margin: "0 auto" }}>
-                {SUGGESTIONS.map((s, i) => (
-                  <button key={i} onClick={() => { setInput(s); inputRef.current?.focus(); }}
-                    style={{
-                      padding: "10px 16px", textAlign: "left", fontSize: "13px", color: T.textSecondary,
-                      background: T.surface, border: `1px solid ${T.border}`, borderRadius: "8px",
-                      cursor: "pointer", fontFamily: SANS, lineHeight: 1.5, transition: "all 0.15s",
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = T.textMuted; e.currentTarget.style.background = T.agentBg; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.background = T.surface; }}
-                  >
-                    {s.startsWith("http") ? `🔗 ${s}` : `→ ${s}`}
+            )}
+          </div>
+
+          {/* Mode Selector */}
+          <div style={{flex:1,minWidth:260}}>
+            <button onClick={()=>setShowModes(!showModes)} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",fontSize:12,background:"none",border:"none",cursor:"pointer",color:P.muted,fontFamily:"'DM Mono',monospace",width:"100%"}}>
+              <span style={{fontSize:8,transition:"transform 0.2s",transform:showModes?"rotate(90deg)":"none"}}>▶</span>
+              <span>Mode</span>
+              <span style={{color:P.cream,fontWeight:600,marginLeft:4}}>{selMode?.label}</span>
+            </button>
+            {showModes&&(
+              <div style={{display:"grid",gap:6,marginTop:6,animation:"fadeUp 0.2s ease"}}>
+                {EXTRACTION_MODES.map(m=>(
+                  <button key={m.id} onClick={()=>{setMode(m.id);setShowModes(false)}} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",textAlign:"left",background:mode===m.id?P.accentGlow:P.raised,border:`1px solid ${mode===m.id?P.borderActive:P.border}`,borderRadius:10,cursor:"pointer",transition:"all 0.2s"}}
+                    onMouseEnter={e=>{if(mode!==m.id)e.currentTarget.style.borderColor=P.borderHover}}onMouseLeave={e=>{if(mode!==m.id)e.currentTarget.style.borderColor=P.border}}>
+                    <span style={{fontSize:16,color:mode===m.id?P.accent:P.faint,width:22,textAlign:"center"}}>{m.icon}</span>
+                    <div><div style={{fontSize:12,fontWeight:600,color:mode===m.id?P.white:P.cream,fontFamily:"'DM Mono',monospace"}}>{m.label}</div><div style={{fontSize:11,color:P.muted,marginTop:2}}>{m.desc}</div></div>
                   </button>
                 ))}
               </div>
-            </div>
-          )}
-
-          {/* Messages */}
-          {messages.map((msg, i) => <ChatMessage key={i} msg={msg} />)}
-          <div ref={chatEndRef} />
+            )}
+          </div>
         </div>
+
+        {/* ── Error ── */}
+        {error&&<div style={{padding:"12px 18px",marginBottom:24,background:P.errorDim,border:`1px solid ${P.errorBorder}`,borderRadius:10,fontSize:12,color:P.error,fontFamily:"'DM Mono',monospace",animation:"fadeUp 0.2s ease"}}>{error}</div>}
+
+        {/* ── Crawl Progress ── */}
+        {loading&&scope!=="single"&&crawlProg.total>0&&<CrawlBar current={crawlProg.current} total={crawlProg.total} pages={crawlProg.pages}/>}
+
+        {/* ── Log ── */}
+        {logs.length>0&&(
+          <div style={{marginBottom:28,animation:"fadeUp 0.3s ease"}}>
+            <div style={{fontSize:10,color:P.faint,marginBottom:6,fontWeight:600,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'DM Mono',monospace"}}>Log</div>
+            <ProgressLog logs={logs}/>
+          </div>
+        )}
+
+        {/* ── Results ── */}
+        {results.length>0&&!loading&&(
+          <div style={{animation:"fadeUp 0.4s ease"}}>
+            <div style={{marginBottom:20,paddingBottom:20,borderBottom:`1px solid ${P.border}`}}>
+              <div style={{fontSize:10,color:P.faint,fontWeight:600,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'DM Mono',monospace",marginBottom:10}}>Results</div>
+              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <TypeBadge type={results[0].urlType}/>
+                <span style={{fontSize:12,color:P.muted,fontFamily:"'DM Mono',monospace"}}>{getDomain(results[0].url)}</span>
+                <span style={{width:1,height:12,background:P.border}}/>
+                <span style={{fontSize:12,color:P.success,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{results.filter(r=>!r.error).length} ok</span>
+                {results.some(r=>r.error)&&<span style={{fontSize:12,color:P.error,fontFamily:"'DM Mono',monospace",fontWeight:600}}>{results.filter(r=>r.error).length} failed</span>}
+                <span style={{width:1,height:12,background:P.border}}/>
+                <span style={{fontSize:11,color:P.faint,fontFamily:"'DM Mono',monospace"}}>{results.reduce((s,r)=>s+(r.tokenUsage?r.tokenUsage.input_tokens+r.tokenUsage.output_tokens:0),0).toLocaleString()} tokens</span>
+              </div>
+            </div>
+
+            <div style={{marginBottom:24}}>
+              <div style={{fontSize:10,color:P.faint,marginBottom:8,fontWeight:600,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'DM Mono',monospace"}}>Export{results.length>1?` all ${results.length}`:""}</div>
+              <ExportPanel results={results}/>
+            </div>
+
+            <div style={{background:P.raised,borderRadius:14,border:`1px solid ${P.border}`,padding:"20px 24px",boxShadow:"0 4px 30px rgba(0,0,0,0.15)"}}>
+              <ResultViewer results={results} isSingle={results.length===1}/>
+            </div>
+          </div>
+        )}
+
+        {/* ── History ── */}
+        {history.length>0&&!loading&&(
+          <div style={{marginTop:56}}>
+            <div style={{fontSize:10,color:P.faint,marginBottom:12,fontWeight:600,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'DM Mono',monospace"}}>Recent</div>
+            {history.map((h,i)=>(
+              <button key={i} onClick={()=>{setUrl(h.url);if(h.scope)setScope(h.scope)}} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",width:"100%",textAlign:"left",background:"transparent",border:`1px solid transparent`,borderRadius:8,cursor:"pointer",transition:"all 0.2s",marginBottom:2}}
+                onMouseEnter={e=>{e.currentTarget.style.background=P.raised;e.currentTarget.style.borderColor=P.border}}onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.borderColor="transparent"}}>
+                <TypeBadge type={h.urlType}/>
+                <span style={{fontSize:12,color:P.cream,fontFamily:"'DM Mono',monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.url}</span>
+                {h.pageCount>1&&<span style={{fontSize:10,color:P.accent,fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{h.pageCount}pg</span>}
+                <span style={{fontSize:10,color:P.faint,fontFamily:"'DM Mono',monospace"}}>{new Date(h.timestamp).toLocaleTimeString()}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
       </div>
 
-      {/* Input bar */}
-      <div style={{
-        position: "fixed", bottom: 0, left: 0, right: 0,
-        background: `linear-gradient(transparent, ${T.bg} 20%)`,
-        padding: "20px 24px 20px",
-      }}>
-        <div style={{
-          maxWidth: 800, margin: "0 auto",
-          display: "flex", gap: 8, alignItems: "flex-end",
-          background: T.surface, border: `1px solid ${T.border}`, borderRadius: "12px",
-          padding: "8px 8px 8px 16px", boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
-        }}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-            placeholder={isLoading ? "Researching..." : "Describe what you want to research, or paste a URL..."}
-            disabled={isLoading}
-            rows={1}
-            style={{
-              flex: 1, padding: "8px 0", fontSize: "14px", fontFamily: SANS,
-              background: "transparent", border: "none", outline: "none",
-              color: T.text, lineHeight: "1.5", minHeight: 24, maxHeight: 120,
-              overflow: "auto",
-            }}
-            onInput={e => { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
-          />
-          {isLoading ? (
-            <button onClick={handleAbort} style={{
-              padding: "8px 16px", fontSize: "12px", fontWeight: 600, fontFamily: MONO,
-              background: T.error, color: "#fff", border: "none", borderRadius: "8px",
-              cursor: "pointer", flexShrink: 0,
-            }}>
-              Stop
-            </button>
-          ) : (
-            <button onClick={handleSend} disabled={!input.trim()} style={{
-              padding: "8px 16px", fontSize: "12px", fontWeight: 600, fontFamily: MONO,
-              background: input.trim() ? T.accent : T.surfaceAlt,
-              color: input.trim() ? "#fff" : T.textFaint,
-              border: "none", borderRadius: "8px", cursor: input.trim() ? "pointer" : "default",
-              flexShrink: 0, transition: "all 0.15s",
-            }}>
-              Send
-            </button>
-          )}
+      {/* ── Footer ── */}
+      <div style={{padding:"24px 28px",borderTop:`1px solid ${P.border}`,textAlign:"center",fontFamily:"'DM Mono',monospace",position:"relative",zIndex:1}}>
+        <div style={{fontSize:10,color:P.faint,letterSpacing:1,lineHeight:2}}>
+          WebScrape · Powered by Anthropic<br/>
+          <span style={{color:P.muted}}>Single page · Connected pages · Deep crawl</span>
         </div>
       </div>
     </div>
